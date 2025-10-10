@@ -261,4 +261,82 @@ async def cmd_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     totals = get_totals(chat.id, start, end)
     if not totals:
-        await update.message.reply_text(f"No transactions found for_
+        await update.message.reply_text(f"No transactions found for {label}.")
+        return
+    parts = [f"{k}: {v:,.2f}" if k == "USD" else f"{k}: {v:,.0f}" for k, v in totals.items()]
+    await update.message.reply_text(f"{label} ➜ " + " | ".join(parts))
+
+
+async def cmd_reset_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _is_admin(update, context):
+        await update.message.reply_text("Admins only.")
+        return
+    chat = update.effective_chat
+    now = dt.datetime.now(TZ)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + dt.timedelta(days=1)
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "DELETE FROM tx WHERE chat_id=? AND ts>=? AND ts<?",
+        (chat.id, start.astimezone(dt.timezone.utc).isoformat(), end.astimezone(dt.timezone.utc).isoformat()),
+    )
+    con.commit()
+    con.close()
+    await update.message.reply_text("Today’s totals cleared.")
+
+
+async def cmd_exportcsv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    now = dt.datetime.now(TZ)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    next_month = (start.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    csv_bytes = export_range_csv(chat.id, start, next_month)
+    await update.message.reply_document(
+        InputFile(csv_bytes, filename="aba_month.csv"),
+        caption="This month’s transactions",
+    )
+
+
+async def cmd_setsource(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _is_admin(update, context):
+        await update.message.reply_text("Admins only.")
+        return
+    username = (context.args[0] if context.args else "").lstrip("@")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO settings(chat_id, source_username) VALUES(?,?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET source_username=excluded.source_username",
+        (update.effective_chat.id, username or None),
+    )
+    con.commit()
+    con.close()
+    if username:
+        await update.message.reply_text(f"Counting only messages from @{username}.")
+    else:
+        await update.message.reply_text("Cleared source filter. Counting all messages.")
+
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN not set. Add it as an env var.")
+    init_db()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("month", cmd_month))
+    app.add_handler(CommandHandler("shift", cmd_shift))
+    app.add_handler(CommandHandler("reset_today", cmd_reset_today))
+    app.add_handler(CommandHandler("exportcsv", cmd_exportcsv))
+    app.add_handler(CommandHandler("setsource", cmd_setsource))
+
+    app.add_handler(MessageHandler(filters.TEXT & (filters.ChatType.GROUPS | filters.ChatType.SUPERGROUPS), on_message))
+
+    log.info("Bot starting…")
+    app.run_polling(close_loop=False)
+
+
+if __name__ == "__main__":
+    main()
